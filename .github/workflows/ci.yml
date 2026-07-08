@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: asktherepo
+          POSTGRES_PASSWORD: asktherepo
+          POSTGRES_DB: asktherepo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U asktherepo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.11.28"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Lint (ruff)
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Type-check (mypy)
+        run: uv run mypy libs services
+
+      - name: Enable pgvector extension
+        run: |
+          PGPASSWORD=asktherepo psql -h localhost -U asktherepo -d asktherepo \
+            -c "CREATE EXTENSION IF NOT EXISTS vector"
+
+      - name: Run migrations
+        env:
+          DATABASE_URL: postgresql+psycopg://asktherepo:asktherepo@localhost:5432/asktherepo
+          ASKTHEREPO_APP_DB_PASSWORD: asktherepo_app_dev_only
+        run: uv run --package asktherepo-core alembic upgrade head
+
+      - name: Test
+        env:
+          DATABASE_URL: postgresql+asyncpg://asktherepo_app:asktherepo_app_dev_only@localhost:5432/asktherepo
+          REDIS_URL: redis://localhost:6379/0
+        run: uv run pytest -v

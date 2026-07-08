@@ -1,0 +1,111 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: asktherepo
+      POSTGRES_PASSWORD: asktherepo
+      POSTGRES_DB: asktherepo
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U asktherepo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # runs schema migrations using the privileged DB role. Application
+  # services below deliberately use a separate, unprivileged role - see
+  # docs/adr/0003-multi-tenancy.md for why that separation matters for RLS.
+  migrate:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.core
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://asktherepo:asktherepo@postgres:5432/asktherepo
+      ASKTHEREPO_APP_DB_PASSWORD: asktherepo_app_dev_only
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  embedding:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.service
+      args:
+        SERVICE_NAME: embedding
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  ingestion:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.service
+      args:
+        SERVICE_NAME: ingestion
+    ports:
+      - "8002:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://asktherepo_app:asktherepo_app_dev_only@postgres:5432/asktherepo
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  query:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.service
+      args:
+        SERVICE_NAME: query
+    ports:
+      - "8003:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://asktherepo_app:asktherepo_app_dev_only@postgres:5432/asktherepo
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.service
+      args:
+        SERVICE_NAME: dashboard
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://asktherepo_app:asktherepo_app_dev_only@postgres:5432/asktherepo
+      QUERY_SERVICE_URL: http://query:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
